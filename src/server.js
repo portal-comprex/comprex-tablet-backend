@@ -152,14 +152,18 @@ app.post('/api/checklist', async (req, res) => {
   if (!dadosPorRotulo || typeof dadosPorRotulo !== 'object') {
     return res.status(400).json({ erro: 'Envie "dadosPorRotulo" com os dados do checklist.' });
   }
+  // Confere o valor ANTES de converter pros nomes internos do SharePoint —
+  // depois da conversão a chave já não se chama mais "Equipamento" (vira o
+  // nome interno real da coluna, ex.: "field_2"), então checar fields.Equipamento
+  // ali na frente sempre falhava mesmo com o campo preenchido certinho.
+  if (!String(dadosPorRotulo.Equipamento || '').trim()) {
+    return res.status(400).json({ erro: 'Informe o equipamento antes de enviar.' });
+  }
   dadosPorRotulo.Operador = sessao.nome;
 
   try {
     const colunasInternas = await carregarColunasChecklist();
     const { fields, faltando } = montarFieldsChecklist(dadosPorRotulo, colunasInternas);
-    if (!fields.Equipamento) {
-      return res.status(400).json({ erro: 'Informe o equipamento antes de enviar.' });
-    }
     await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_CHECKLISTS_ID + '/items', { fields });
     return res.json({ ok: true, colunasNaoEncontradas: faltando });
   } catch (err) {
@@ -269,46 +273,4 @@ app.post('/api/admin/operadores', async (req, res) => {
     if (jaExiste) {
       return res.status(409).json({ erro: 'Já existe um operador com esse nome de usuário.' });
     }
-    const criado = await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items', {
-      fields: { Title: nome, Usuario: usuario, SenhaHash: hashSenha(senha), Ativo: 'Sim' }
-    });
-    return res.json({ ok: true, id: criado.id });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ erro: 'Erro ao criar operador: ' + err.message });
-  }
-});
-
-// ---------------------------------------------------------------------
-// PATCH /api/admin/operadores/:id  { senha?, ativo? }  (X-Admin-Key)
-// ---------------------------------------------------------------------
-app.patch('/api/admin/operadores/:id', async (req, res) => {
-  try { exigirChaveAdmin(req); }
-  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
-
-  const id = req.params.id;
-  const body = req.body || {};
-  const campos = {};
-  if (typeof body.senha === 'string' && body.senha) {
-    if (body.senha.length < 6) return res.status(400).json({ erro: 'A senha precisa ter pelo menos 6 caracteres.' });
-    campos.SenhaHash = hashSenha(body.senha);
-  }
-  if (typeof body.ativo === 'boolean') {
-    campos.Ativo = body.ativo ? 'Sim' : 'Não';
-  }
-  if (!Object.keys(campos).length) {
-    return res.status(400).json({ erro: 'Nada para atualizar — envie "senha" e/ou "ativo".' });
-  }
-  try {
-    await graphPatch('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items/' + id + '/fields', campos);
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ erro: 'Erro ao atualizar operador: ' + err.message });
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log('Comprex tablet backend rodando na porta ' + PORT);
-});
+    const criado = await graphPost('/sites/' + SITE_ID + '/lists/' +
