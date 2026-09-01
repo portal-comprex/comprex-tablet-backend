@@ -33,7 +33,11 @@ app.get('/api/admin/debug-itens-checklist', async (req, res) => {
     const LISTA_ITENS_CHECKLIST_ID = process.env.LISTA_ITENS_CHECKLIST_ID;
     const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_ITENS_CHECKLIST_ID + '/items?$expand=fields&$top=999');
     const linhas = (d.value || []).map(function (item) { return item.fields; });
-    return res.json({ totalLinhas: linhas.length, amostra: linhas.slice(0, 5) });
+    const colunas = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_ITENS_CHECKLIST_ID + '/columns');
+    const mapaColunas = (colunas.value || [])
+      .filter(function (c) { return !c.hidden; })
+      .map(function (c) { return { displayName: c.displayName, name: c.name }; });
+    return res.json({ totalLinhas: linhas.length, amostra: linhas.slice(0, 5), mapaColunas });
   } catch (err) {
     return res.status(500).json({ erro: 'Falha ao ler ItensChecklist: ' + err.message });
   }
