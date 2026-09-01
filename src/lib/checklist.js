@@ -10,17 +10,40 @@ function dividirRespostas(txt) {
   return String(txt || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
 }
 
+/** Busca o mapa displayName -> nome interno das colunas da lista
+ *  ItensChecklist. Necessário porque, nessa lista, o SharePoint gerou nomes
+ *  internos genéricos (field_1, field_2, ...) diferentes dos nomes exibidos
+ *  (Ordem, RespostasBoas, ...) — provavelmente por causa da acentuação no
+ *  nome da coluna na hora da criação. */
+async function carregarColunasItensChecklist() {
+  const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_ITENS_CHECKLIST_ID + '/columns');
+  const mapa = {};
+  (d.value || []).forEach(function (col) {
+    mapa[col.displayName.trim().toLowerCase()] = col.name;
+  });
+  return mapa;
+}
+
 /** Lê a lista "ItensChecklist" do SharePoint — mesma lógica de
  *  carregarItensChecklistDoSharePoint() no portal_comprex.html — pra manter
- *  as perguntas do checklist do tablet sempre iguais às do app principal. */
+ *  as perguntas do checklist do tablet sempre iguais às do app principal.
+ *  Usa o mapa de colunas (ver acima) em vez de acessar os campos pelo nome
+ *  de exibição, porque nessa lista o nome interno real é diferente. */
 async function carregarItensChecklist() {
-  const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_ITENS_CHECKLIST_ID + '/items?$expand=fields&$top=999');
+  const [d, mapaColunas] = await Promise.all([
+    graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_ITENS_CHECKLIST_ID + '/items?$expand=fields&$top=999'),
+    carregarColunasItensChecklist()
+  ]);
+  function val(f, displayName) {
+    const nomeInterno = mapaColunas[displayName.trim().toLowerCase()];
+    return nomeInterno ? f[nomeInterno] : undefined;
+  }
   const linhas = (d.value || []).map(function (item) { return item.fields; })
     .filter(function (f) {
-      const ativo = String(f.Ativo || 'Sim').trim().toLowerCase();
+      const ativo = String(val(f, 'Ativo') || 'Sim').trim().toLowerCase();
       return ativo !== 'não' && ativo !== 'nao';
     });
-  linhas.sort(function (a, b) { return (parseFloat(a.Ordem) || 0) - (parseFloat(b.Ordem) || 0); });
+  linhas.sort(function (a, b) { return (parseFloat(val(a, 'Ordem')) || 0) - (parseFloat(val(b, 'Ordem')) || 0); });
   const itens = [];
   let extraData = null;
   let labelParada = null;
@@ -28,20 +51,20 @@ async function carregarItensChecklist() {
     const titulo = String(f.Title || '').trim();
     if (!titulo) return;
     const opcoes = [];
-    dividirRespostas(f.RespostasBoas).forEach(function (v) { opcoes.push([v, 'ok']); });
-    dividirRespostas(f.RespostasAtencao).forEach(function (v) { opcoes.push([v, 'at']); });
-    dividirRespostas(f.RespostasRuins).forEach(function (v) { opcoes.push([v, 'ru']); });
-    dividirRespostas(f.RespostasNaoSeAplica).forEach(function (v) { opcoes.push([v, 'na']); });
+    dividirRespostas(val(f, 'RespostasBoas')).forEach(function (v) { opcoes.push([v, 'ok']); });
+    dividirRespostas(val(f, 'RespostasAtencao')).forEach(function (v) { opcoes.push([v, 'at']); });
+    dividirRespostas(val(f, 'RespostasRuins')).forEach(function (v) { opcoes.push([v, 'ru']); });
+    dividirRespostas(val(f, 'RespostasNaoSeAplica')).forEach(function (v) { opcoes.push([v, 'na']); });
     if (!opcoes.length) return;
     itens.push([titulo, opcoes]);
-    if (!extraData && String(f.CampoExtraTipo || '').trim().toLowerCase() === 'data') {
+    if (!extraData && String(val(f, 'CampoExtraTipo') || '').trim().toLowerCase() === 'data') {
       extraData = {
         label: titulo,
-        rotulo: String(f.CampoExtraRotulo || 'Data').trim() || 'Data',
-        opcionalSe: String(f.CampoExtraOpcionalSe || '').trim()
+        rotulo: String(val(f, 'CampoExtraRotulo') || 'Data').trim() || 'Data',
+        opcionalSe: String(val(f, 'CampoExtraOpcionalSe') || '').trim()
       };
     }
-    if (!labelParada && String(f.EhItemDeParada || '').trim().toLowerCase() === 'sim') {
+    if (!labelParada && String(val(f, 'EhItemDeParada') || '').trim().toLowerCase() === 'sim') {
       labelParada = titulo;
     }
   });
