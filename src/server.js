@@ -23,6 +23,23 @@ app.get('/', (req, res) => res.json({ ok: true, servico: 'comprex-tablet-backend
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ---------------------------------------------------------------------
+// TEMPORÁRIO — diagnóstico da lista ItensChecklist (protegido por X-Admin-Key).
+// Remover depois que o problema do checklist vazio for resolvido.
+// ---------------------------------------------------------------------
+app.get('/api/admin/debug-itens-checklist', async (req, res) => {
+  try { exigirChaveAdmin(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  try {
+    const LISTA_ITENS_CHECKLIST_ID = process.env.LISTA_ITENS_CHECKLIST_ID;
+    const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_ITENS_CHECKLIST_ID + '/items?$expand=fields&$top=999');
+    const linhas = (d.value || []).map(function (item) { return item.fields; });
+    return res.json({ totalLinhas: linhas.length, amostra: linhas.slice(0, 5) });
+  } catch (err) {
+    return res.status(500).json({ erro: 'Falha ao ler ItensChecklist: ' + err.message });
+  }
+});
+
+// ---------------------------------------------------------------------
 // POST /api/login  { usuario, senha } -> { token, nome }
 // ---------------------------------------------------------------------
 app.post('/api/login', async (req, res) => {
