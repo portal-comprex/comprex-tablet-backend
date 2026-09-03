@@ -2,7 +2,10 @@ const express = require('express');
 const cors = require('cors');
 
 const { graphGet, graphPost, graphPatch, SITE_ID } = require('./lib/graph');
-const { assinarToken, conferirSenha, exigirOperadorLogado, exigirChaveAdmin, hashSenha } = require('./lib/auth');
+const {
+  assinarToken, conferirSenha, exigirOperadorLogado, exigirChaveAdmin, hashSenha,
+  statusBloqueioLogin, registrarTentativaFalha, limparTentativas, infoPresenca
+} = require('./lib/auth');
 const { carregarItensChecklist, carregarColunasChecklist, montarFieldsChecklist } = require('./lib/checklist');
 const { buscarUrlFotoEquipamento } = require('./lib/fotos');
 
@@ -33,6 +36,13 @@ app.post('/api/login', async (req, res) => {
   if (!usuario || !senha) {
     return res.status(400).json({ erro: 'Informe usuário e senha.' });
   }
+  // Bloqueia tentativas repetidas de senha errada (ataque de força bruta) —
+  // depois de LIMITE_TENTATIVAS erros seguidos, esse usuário fica travado
+  // por um tempo, mesmo que a senha certa seja informada nesse meio-tempo.
+  const bloqueio = statusBloqueioLogin(usuario);
+  if (bloqueio.bloqueado) {
+    return res.status(429).json({ erro: 'Muitas tentativas erradas. Tente novamente em ' + bloqueio.minutosRestantes + ' minuto(s).' });
+  }
   try {
     const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items?$expand=fields&$top=999');
     const item = (d.value || []).find(function (it) {
@@ -41,8 +51,10 @@ app.post('/api/login', async (req, res) => {
     const ativo = item && String((item.fields.Ativo === undefined ? 'Sim' : item.fields.Ativo)).trim().toLowerCase();
     const inativo = ativo === 'não' || ativo === 'nao' || ativo === 'false';
     if (!item || inativo || !item.fields.SenhaHash || !conferirSenha(senha, item.fields.SenhaHash)) {
+      registrarTentativaFalha(usuario);
       return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
     }
+    limparTentativas(usuario);
     const nome = String(item.fields.Title || usuario).trim();
     const token = assinarToken({ sub: item.id, usuario, nome, role: 'operador' });
     return res.json({ token, nome });
@@ -50,6 +62,19 @@ app.post('/api/login', async (req, res) => {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao verificar login. Tente novamente em instantes.' });
   }
+});
+
+// ---------------------------------------------------------------------
+// GET /api/ping  (Authorization: Bearer <token>)
+// Só serve pra marcar "presença" (visto pela última vez agora) e confirmar
+// que o token ainda é válido — o tablet chama isso periodicamente enquanto
+// o operador está logado, sem depender de ele estar realmente enviando
+// checklists/parte diária no momento.
+// ---------------------------------------------------------------------
+app.get('/api/ping', (req, res) => {
+  try { exigirOperadorLogado(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  return res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------
@@ -236,12 +261,15 @@ app.get('/api/admin/operadores', async (req, res) => {
     const lista = (d.value || []).map(function (item) {
       const f = item.fields || {};
       const ativo = String(f.Ativo === undefined ? 'Sim' : f.Ativo).trim().toLowerCase();
+      const presenca = infoPresenca(f.Usuario);
       return {
         id: item.id,
         nome: f.Title || '',
         usuario: f.Usuario || '',
         temLoginTablet: !!f.Usuario,
-        ativo: ativo !== 'não' && ativo !== 'nao' && ativo !== 'false'
+        ativo: ativo !== 'não' && ativo !== 'nao' && ativo !== 'false',
+        online: presenca.online,
+        ultimoAcesso: presenca.ultimoAcesso // timestamp em ms, ou null se nunca logou desde que o backend subiu
       };
     });
     return res.json({ operadores: lista });
