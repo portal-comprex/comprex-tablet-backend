@@ -1,13 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 
-const { graphGet, graphPost, graphPatch, SITE_ID } = require('./lib/graph');
+const { graphGet, graphPost, graphPatch, graphDelete, SITE_ID } = require('./lib/graph');
 const {
   assinarToken, conferirSenha, exigirOperadorLogado, exigirChaveAdmin, hashSenha,
   statusBloqueioLogin, registrarTentativaFalha, limparTentativas, infoPresenca
 } = require('./lib/auth');
 const { carregarItensChecklist, carregarColunasChecklist, montarFieldsChecklist } = require('./lib/checklist');
 const { buscarUrlFotoEquipamento } = require('./lib/fotos');
+const { exigirContaMicrosoft } = require('./lib/msalAuth');
+const { exigirPermissaoControladoria } = require('./lib/ctrlPermissoes');
+const { idDaLista } = require('./lib/ctrlLists');
 
 const LISTA_OPERADORES_ID = process.env.LISTA_OPERADORES_ID;
 const LISTA_FROTA_ID = process.env.LISTA_FROTA_ID;
@@ -337,6 +340,212 @@ app.patch('/api/admin/operadores/:id', async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao atualizar operador: ' + err.message });
+  }
+});
+
+// =======================================================================
+// CONTROLADORIA — dados que antes viviam no Supabase (ver Etapa 3).
+// Autenticação: confia na sessão Microsoft que a pessoa já tem no Portal
+// (nada de segunda senha) + uma lista de permissões no SharePoint dizendo
+// quem pode entrar e com qual perfil.
+// =======================================================================
+// A tela da Controladoria agora é aberta em dois lugares: dentro do Portal
+// (pessoa com conta Microsoft) e dentro do tablet de campo (operador com o
+// login próprio do tablet, sem conta Microsoft nenhuma). Por isso a sessão
+// aceita os dois tipos de token — primeiro tenta como operador de campo
+// (mais rápido, não depende de rede da Microsoft); se não for esse tipo de
+// token, tenta como conta Microsoft do Portal.
+async function exigirSessaoControladoria(req) {
+  try {
+    const payload = exigirOperadorLogado(req);
+    return { email: null, nome: payload.nome, perfil: 'campo' };
+  } catch (eOperador) {
+    // não era um token nosso — segue pra tentativa como conta Microsoft
+  }
+  const conta = await exigirContaMicrosoft(req);
+  const permissao = await exigirPermissaoControladoria(conta.email);
+  return { email: conta.email, nome: conta.nome, perfil: permissao.perfil };
+}
+
+// Operador de campo só pode ESCREVER nas duas listas que são dele mesmo
+// (o próprio lançamento de parte diária) — as demais (ordens, tarifas,
+// cadastros...) ele só LÊ, pra preencher o formulário. Perfis de escritório/
+// controladoria continuam com acesso completo, como sempre.
+function permiteEscritaControladoria(perfil, nomeLista) {
+  if (perfil !== 'campo') return true;
+  return nomeLista === 'apropriacoes' || nomeLista === 'apropriacoesRascunhos';
+}
+
+// GET /api/ctrl/sessao  (Authorization: Bearer <token MSAL do Portal>)
+// Confirma que a pessoa pode entrar na Controladoria e com qual perfil —
+// é a "tela de login" da Controladoria, só que sem pedir nada digitado.
+app.get('/api/ctrl/sessao', async (req, res) => {
+  try {
+    const sessao = await exigirSessaoControladoria(req);
+    return res.json(sessao);
+  } catch (e) {
+    return res.status(e.status || 401).json({ erro: e.message });
+  }
+});
+
+async function localizarItemPorId(listaId, idLogico) {
+  const filtro = encodeURIComponent("fields/Title eq '" + String(idLogico).replace(/'/g, "''") + "'");
+  const d = await graphGet('/sites/' + SITE_ID + '/lists/' + listaId + '/items?$expand=fields&$filter=' + filtro);
+  return (d.value || [])[0] || null;
+}
+
+// GET /api/ctrl/:lista  -> { itens: [...] }
+app.get('/api/ctrl/:lista', async (req, res) => {
+  try { await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+
+  const listaId = idDaLista(req.params.lista);
+  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
+
+  try {
+    const d = await graphGet('/sites/' + SITE_ID + '/lists/' + listaId + '/items?$expand=fields&$top=999');
+    const itens = (d.value || []).map(function (item) {
+      try { return JSON.parse((item.fields || {}).Dados || 'null'); }
+      catch (e) { return null; }
+    }).filter(function (x) { return x !== null; });
+    return res.json({ itens: itens });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao carregar "' + req.params.lista + '": ' + err.message });
+  }
+});
+
+// POST /api/ctrl/:lista  { item }  -> cria um item novo (item.id definido pelo cliente)
+app.post('/api/ctrl/:lista', async (req, res) => {
+  let sessao;
+  try { sessao = await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  if (!permiteEscritaControladoria(sessao.perfil, req.params.lista)) {
+    return res.status(403).json({ erro: 'Seu perfil não tem permissão de gravar em "' + req.params.lista + '".' });
+  }
+
+  const listaId = idDaLista(req.params.lista);
+  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
+
+  const item = (req.body || {}).item;
+  if (!item || item.id === undefined || item.id === null || item.id === '') {
+    return res.status(400).json({ erro: 'Envie "item" com um campo "id".' });
+  }
+  try {
+    await graphPost('/sites/' + SITE_ID + '/lists/' + listaId + '/items', {
+      fields: { Title: String(item.id), Dados: JSON.stringify(item) }
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao criar item em "' + req.params.lista + '": ' + err.message });
+  }
+});
+
+// PATCH /api/ctrl/:lista/:id  { item }  -> substitui o conteúdo de um item existente
+app.patch('/api/ctrl/:lista/:id', async (req, res) => {
+  let sessao;
+  try { sessao = await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  if (!permiteEscritaControladoria(sessao.perfil, req.params.lista)) {
+    return res.status(403).json({ erro: 'Seu perfil não tem permissão de gravar em "' + req.params.lista + '".' });
+  }
+
+  const listaId = idDaLista(req.params.lista);
+  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
+
+  const item = (req.body || {}).item;
+  if (!item) return res.status(400).json({ erro: 'Envie "item".' });
+
+  try {
+    const achado = await localizarItemPorId(listaId, req.params.id);
+    if (!achado) return res.status(404).json({ erro: 'Item não encontrado.' });
+    await graphPatch('/sites/' + SITE_ID + '/lists/' + listaId + '/items/' + achado.id + '/fields', { Dados: JSON.stringify(item) });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao atualizar item em "' + req.params.lista + '": ' + err.message });
+  }
+});
+
+// DELETE /api/ctrl/:lista/:id
+app.delete('/api/ctrl/:lista/:id', async (req, res) => {
+  let sessao;
+  try { sessao = await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  if (!permiteEscritaControladoria(sessao.perfil, req.params.lista)) {
+    return res.status(403).json({ erro: 'Seu perfil não tem permissão de excluir em "' + req.params.lista + '".' });
+  }
+
+  const listaId = idDaLista(req.params.lista);
+  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
+
+  try {
+    const achado = await localizarItemPorId(listaId, req.params.id);
+    if (!achado) return res.json({ ok: true }); // já não existe — segue o jogo
+    await graphDelete('/sites/' + SITE_ID + '/lists/' + listaId + '/items/' + achado.id);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao excluir item em "' + req.params.lista + '": ' + err.message });
+  }
+});
+
+// ---------------------------------------------------------------------
+// "Configurações soltas" da Controladoria — o que no Supabase era um objeto
+// único (não uma lista de itens com id): detalhes/números de clientes,
+// materiais de pesagem, serviços de hora/verba, metas mensais, descrições
+// de boletim, ordens restritas por usuário. Cada uma é UM item aqui,
+// identificada pelo próprio nome da configuração.
+//   GET  /api/ctrl-config/:chave   -> { valor: <objeto ou null> }
+//   PUT  /api/ctrl-config/:chave   { valor }
+// ---------------------------------------------------------------------
+app.get('/api/ctrl-config/:chave', async (req, res) => {
+  try { await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+
+  const listaId = idDaLista('configuracoesCtrl');
+  if (!listaId) return res.status(500).json({ erro: 'Lista de configurações da Controladoria não está configurada no backend.' });
+
+  try {
+    const achado = await localizarItemPorId(listaId, req.params.chave);
+    if (!achado) return res.json({ valor: null });
+    let valor = null;
+    try { valor = JSON.parse((achado.fields || {}).Dados || 'null'); } catch (e) { valor = null; }
+    return res.json({ valor: valor });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao carregar configuração "' + req.params.chave + '": ' + err.message });
+  }
+});
+
+app.put('/api/ctrl-config/:chave', async (req, res) => {
+  let sessao;
+  try { sessao = await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  if (sessao.perfil === 'campo') {
+    return res.status(403).json({ erro: 'Seu perfil não tem permissão de alterar configurações.' });
+  }
+
+  const listaId = idDaLista('configuracoesCtrl');
+  if (!listaId) return res.status(500).json({ erro: 'Lista de configurações da Controladoria não está configurada no backend.' });
+
+  const valor = (req.body || {}).valor;
+  if (valor === undefined) return res.status(400).json({ erro: 'Envie "valor".' });
+
+  try {
+    const achado = await localizarItemPorId(listaId, req.params.chave);
+    if (achado) {
+      await graphPatch('/sites/' + SITE_ID + '/lists/' + listaId + '/items/' + achado.id + '/fields', { Dados: JSON.stringify(valor) });
+    } else {
+      await graphPost('/sites/' + SITE_ID + '/lists/' + listaId + '/items', {
+        fields: { Title: req.params.chave, Dados: JSON.stringify(valor) }
+      });
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao salvar configuração "' + req.params.chave + '": ' + err.message });
   }
 });
 

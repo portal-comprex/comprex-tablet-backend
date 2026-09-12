@@ -84,4 +84,17 @@ async function graphPatch(caminho, corpo) {
   return r.json();
 }
 
-module.exports = { obterTokenDeAplicativo, graphGet, graphPost, graphPatch, SITE_ID };
+async function graphDelete(caminho) {
+  const token = await obterTokenDeAplicativo();
+  const r = await fetch('https://graph.microsoft.com/v1.0' + caminho, {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer ' + token }
+  });
+  if (!r.ok && r.status !== 404) {
+    const texto = await r.text();
+    throw new Error('Graph DELETE ' + caminho + ' falhou (' + r.status + '): ' + texto);
+  }
+  return true;
+}
+
+module.exports = { obterTokenDeAplicativo, graphGet, graphPost, graphPatch, graphDelete, SITE_ID };
