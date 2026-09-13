@@ -359,13 +359,16 @@ app.patch('/api/admin/operadores/:id', async (req, res) => {
 async function exigirSessaoControladoria(req) {
   try {
     const payload = exigirOperadorLogado(req);
-    return { email: null, nome: payload.nome, perfil: 'campo' };
+    return { email: null, nome: payload.nome, perfil: 'campo', telas: null };
   } catch (eOperador) {
     // não era um token nosso — segue pra tentativa como conta Microsoft
   }
   const conta = await exigirContaMicrosoft(req);
+  // permissao.tipo: 'admin' (tudo liberado) ou 'limitado' (só as telas da
+  // Controladoria marcadas em "Gerenciar Acessos" no Portal — mesma tela que
+  // já é usada pra Checklists/Movimentações). telas null = sem restrição.
   const permissao = await exigirPermissaoControladoria(conta.email);
-  return { email: conta.email, nome: conta.nome, perfil: permissao.perfil };
+  return { email: conta.email, nome: conta.nome, perfil: permissao.tipo, telas: permissao.telas };
 }
 
 // Operador de campo só pode ESCREVER nas duas listas que são dele mesmo
