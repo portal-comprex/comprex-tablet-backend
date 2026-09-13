@@ -265,20 +265,27 @@ app.get('/api/admin/operadores', async (req, res) => {
 
   try {
     const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items?$expand=fields&$top=999');
-    const lista = (d.value || []).map(function (item) {
-      const f = item.fields || {};
-      const ativo = String(f.Ativo === undefined ? 'Sim' : f.Ativo).trim().toLowerCase();
-      const presenca = infoPresenca(f.Usuario);
-      return {
-        id: item.id,
-        nome: f.Title || '',
-        usuario: f.Usuario || '',
-        temLoginTablet: !!f.Usuario,
-        ativo: ativo !== 'não' && ativo !== 'nao' && ativo !== 'false',
-        online: presenca.online,
-        ultimoAcesso: presenca.ultimoAcesso // timestamp em ms, ou null se nunca logou desde que o backend subiu
-      };
-    });
+    // Esta MESMA lista do SharePoint também serve o cadastro de Operadores da
+    // Controladoria (matrícula/cargo, sem login nenhum) — por isso só entram
+    // aqui os registros que têm de fato um login de tablet (campo Usuario
+    // preenchido). Sem esse filtro, todo operador cadastrado só pela
+    // Controladoria aparecia aqui como se tivesse login.
+    const lista = (d.value || [])
+      .filter(function (item) { return !!(item.fields || {}).Usuario; })
+      .map(function (item) {
+        const f = item.fields || {};
+        const ativo = String(f.Ativo === undefined ? 'Sim' : f.Ativo).trim().toLowerCase();
+        const presenca = infoPresenca(f.Usuario);
+        return {
+          id: item.id,
+          nome: f.Title || '',
+          usuario: f.Usuario || '',
+          temLoginTablet: !!f.Usuario,
+          ativo: ativo !== 'não' && ativo !== 'nao' && ativo !== 'false',
+          online: presenca.online,
+          ultimoAcesso: presenca.ultimoAcesso // timestamp em ms, ou null se nunca logou desde que o backend subiu
+        };
+      });
     return res.json({ operadores: lista });
   } catch (err) {
     console.error(err);
@@ -349,10 +356,14 @@ app.patch('/api/admin/operadores/:id', async (req, res) => {
 
 // ---------------------------------------------------------------------
 // DELETE /api/admin/operadores/:id  (X-Admin-Key)
-// Remove definitivamente a conta de login do tablet desse operador. Não
-// apaga nenhum checklist/parte-diária já lançados por ele (esses ficam
-// gravados normalmente, só deixam de ter um login associado) — só a conta
-// em si (Login Tablet), pra permitir reaproveitar aquele nome de usuário.
+// Remove o LOGIN do tablet desse operador (apaga usuário/senha) — mas não
+// o registro inteiro, porque essa mesma lista do SharePoint também é o
+// cadastro de Operadores da Controladoria (matrícula/cargo) e pode ter
+// apropriações/checklists históricos vinculados ao nome dele. Um delete
+// físico do item apagaria esse histórico de cadastro também; em vez disso
+// só limpamos Usuario/SenhaHash, o que já tira essa pessoa da lista de
+// "Login Tablet" (ver filtro no GET acima) e libera o nome de usuário pra
+// ser reaproveitado depois.
 // ---------------------------------------------------------------------
 app.delete('/api/admin/operadores/:id', async (req, res) => {
   try { exigirChaveAdmin(req); }
@@ -360,11 +371,51 @@ app.delete('/api/admin/operadores/:id', async (req, res) => {
 
   const id = req.params.id;
   try {
-    await graphDelete('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items/' + id);
+    await graphPatch('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items/' + id + '/fields', {
+      Usuario: '', SenhaHash: ''
+    });
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao remover operador: ' + err.message });
+  }
+});
+
+// ---------------------------------------------------------------------
+// PATCH /api/ctrl/operadores/:id/senha  { usuario?, senha }
+// Define/redefine o login do tablet de um operador diretamente pela tela de
+// Cadastros da Controladoria (mesmo registro da lista Operadores, mesma
+// coisa que o botão "Redefinir senha" do Portal faz) — só que sem precisar
+// abrir o painel separado "Login Tablet". Só administrador da Controladoria
+// pode usar (mesmo tratamento de permissão que Cadastros já tem).
+// ---------------------------------------------------------------------
+app.patch('/api/ctrl/operadores/:id/senha', async (req, res) => {
+  let sessao;
+  try { sessao = await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  if (sessao.perfil !== 'admin') {
+    return res.status(403).json({ erro: 'Só administrador pode definir login de tablet.' });
+  }
+  const usuario = String((req.body || {}).usuario || '').trim().toLowerCase();
+  const senha = String((req.body || {}).senha || '');
+  if (!senha) return res.status(400).json({ erro: 'Informe a senha.' });
+  if (senha.length < 6) return res.status(400).json({ erro: 'A senha precisa ter pelo menos 6 caracteres.' });
+  const id = req.params.id;
+  try {
+    const campos = { SenhaHash: hashSenha(senha) };
+    if (usuario) {
+      const existentes = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items?$expand=fields&$top=999');
+      const jaExiste = (existentes.value || []).some(function (it) {
+        return String(it.id) !== String(id) && String((it.fields || {}).Usuario || '').trim().toLowerCase() === usuario;
+      });
+      if (jaExiste) return res.status(409).json({ erro: 'Já existe um operador com esse nome de usuário.' });
+      campos.Usuario = usuario;
+    }
+    await graphPatch('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items/' + id + '/fields', campos);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao definir login: ' + err.message });
   }
 });
 
