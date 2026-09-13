@@ -57,7 +57,14 @@ function equipamentoDoItem(item) {
   return {
     id: String(item.id),
     codigo: String(f.Title || '').trim(),
-    tipo: String(f.TipoEquipamento || '').trim(),
+    // O tablet/Portal (cadastro de Frota do Checklist) grava a descrição do
+    // equipamento em "Descricao" — era isso que faltava aqui: a Controladoria
+    // lia de "TipoEquipamento" (uma coluna que nunca existiu de verdade nessa
+    // lista), então todo equipamento cadastrado por lá aparecia sem
+    // descrição ("CAR0012 —", sem nada depois do travessão). Mantém
+    // TipoEquipamento como reserva só pro caso de já existir algum registro
+    // antigo gravado só por esse nome.
+    tipo: String(f.Descricao || f.TipoEquipamento || '').trim(),
     observacao: String(f.ObservacaoCtrl || '').trim(),
     // Local ATUAL do equipamento (mesmo campo que o tablet/Portal usam pra
     // Movimentações) — a Controladoria usa isso pra achar sozinha a Ordem
@@ -75,7 +82,9 @@ async function criarEquipamento(item) {
   await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_FROTA_ID + '/items', {
     fields: {
       Title: String(item.codigo || '').trim(),
-      TipoEquipamento: String(item.tipo || '').trim(),
+      // "Descricao" é a mesma coluna que o Checklist/Frota do tablet usa —
+      // ver equipamentoDoItem() acima.
+      Descricao: String(item.tipo || '').trim(),
       ObservacaoCtrl: String(item.observacao || '').trim(),
       // Mantém a Frota utilizável no checklist do tablet mesmo pra quem
       // cadastrar só pela Controladoria (o tablet exige TipoItem == "implemento"
@@ -88,7 +97,7 @@ async function criarEquipamento(item) {
 async function atualizarEquipamento(idItem, item) {
   await graphPatch('/sites/' + SITE_ID + '/lists/' + LISTA_FROTA_ID + '/items/' + idItem + '/fields', {
     Title: String(item.codigo || '').trim(),
-    TipoEquipamento: String(item.tipo || '').trim(),
+    Descricao: String(item.tipo || '').trim(),
     ObservacaoCtrl: String(item.observacao || '').trim()
   });
 }
