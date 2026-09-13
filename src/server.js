@@ -347,6 +347,27 @@ app.patch('/api/admin/operadores/:id', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------
+// DELETE /api/admin/operadores/:id  (X-Admin-Key)
+// Remove definitivamente a conta de login do tablet desse operador. Não
+// apaga nenhum checklist/parte-diária já lançados por ele (esses ficam
+// gravados normalmente, só deixam de ter um login associado) — só a conta
+// em si (Login Tablet), pra permitir reaproveitar aquele nome de usuário.
+// ---------------------------------------------------------------------
+app.delete('/api/admin/operadores/:id', async (req, res) => {
+  try { exigirChaveAdmin(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+
+  const id = req.params.id;
+  try {
+    await graphDelete('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items/' + id);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao remover operador: ' + err.message });
+  }
+});
+
 // =======================================================================
 // CONTROLADORIA — dados que antes viviam no Supabase (ver Etapa 3).
 // Autenticação: confia na sessão Microsoft que a pessoa já tem no Portal
