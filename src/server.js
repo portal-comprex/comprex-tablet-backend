@@ -11,6 +11,7 @@ const { buscarUrlFotoEquipamento } = require('./lib/fotos');
 const { exigirContaMicrosoft } = require('./lib/msalAuth');
 const { exigirPermissaoControladoria } = require('./lib/ctrlPermissoes');
 const { idDaLista } = require('./lib/ctrlLists');
+const ctrlCompartilhados = require('./lib/ctrlCompartilhados');
 
 const LISTA_OPERADORES_ID = process.env.LISTA_OPERADORES_ID;
 const LISTA_FROTA_ID = process.env.LISTA_FROTA_ID;
@@ -399,6 +400,18 @@ app.get('/api/ctrl/:lista', async (req, res) => {
   try { await exigirSessaoControladoria(req); }
   catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
 
+  // Equipamentos e Operadores são cadastro COMPARTILHADO com o tablet/Portal
+  // (mesmas listas Frota/Operadores) — ver src/lib/ctrlCompartilhados.js.
+  if (ctrlCompartilhados.ehListaCompartilhada(req.params.lista)) {
+    try {
+      const itens = await ctrlCompartilhados.carregar(req.params.lista);
+      return res.json({ itens: itens });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ erro: 'Erro ao carregar "' + req.params.lista + '": ' + err.message });
+    }
+  }
+
   const listaId = idDaLista(req.params.lista);
   if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
 
@@ -424,13 +437,24 @@ app.post('/api/ctrl/:lista', async (req, res) => {
     return res.status(403).json({ erro: 'Seu perfil não tem permissão de gravar em "' + req.params.lista + '".' });
   }
 
-  const listaId = idDaLista(req.params.lista);
-  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
-
   const item = (req.body || {}).item;
   if (!item || item.id === undefined || item.id === null || item.id === '') {
     return res.status(400).json({ erro: 'Envie "item" com um campo "id".' });
   }
+
+  if (ctrlCompartilhados.ehListaCompartilhada(req.params.lista)) {
+    try {
+      await ctrlCompartilhados.criar(req.params.lista, item);
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ erro: 'Erro ao criar item em "' + req.params.lista + '": ' + err.message });
+    }
+  }
+
+  const listaId = idDaLista(req.params.lista);
+  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
+
   try {
     await graphPost('/sites/' + SITE_ID + '/lists/' + listaId + '/items', {
       fields: { Title: String(item.id), Dados: JSON.stringify(item) }
@@ -451,11 +475,21 @@ app.patch('/api/ctrl/:lista/:id', async (req, res) => {
     return res.status(403).json({ erro: 'Seu perfil não tem permissão de gravar em "' + req.params.lista + '".' });
   }
 
-  const listaId = idDaLista(req.params.lista);
-  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
-
   const item = (req.body || {}).item;
   if (!item) return res.status(400).json({ erro: 'Envie "item".' });
+
+  if (ctrlCompartilhados.ehListaCompartilhada(req.params.lista)) {
+    try {
+      await ctrlCompartilhados.atualizar(req.params.lista, req.params.id, item);
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ erro: 'Erro ao atualizar item em "' + req.params.lista + '": ' + err.message });
+    }
+  }
+
+  const listaId = idDaLista(req.params.lista);
+  if (!listaId) return res.status(500).json({ erro: 'Lista "' + req.params.lista + '" não está configurada no backend.' });
 
   try {
     const achado = await localizarItemPorId(listaId, req.params.id);
@@ -475,6 +509,16 @@ app.delete('/api/ctrl/:lista/:id', async (req, res) => {
   catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
   if (!permiteEscritaControladoria(sessao.perfil, req.params.lista)) {
     return res.status(403).json({ erro: 'Seu perfil não tem permissão de excluir em "' + req.params.lista + '".' });
+  }
+
+  if (ctrlCompartilhados.ehListaCompartilhada(req.params.lista)) {
+    try {
+      await ctrlCompartilhados.excluir(req.params.lista, req.params.id);
+      return res.json({ ok: true });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ erro: 'Erro ao excluir item em "' + req.params.lista + '": ' + err.message });
+    }
   }
 
   const listaId = idDaLista(req.params.lista);
@@ -547,6 +591,147 @@ app.put('/api/ctrl-config/:chave', async (req, res) => {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao salvar configuração "' + req.params.chave + '": ' + err.message });
   }
+});
+
+// ---------------------------------------------------------------------
+// Migração única dos dados que ainda estão no Supabase (tabela
+// "app_storage", chave/valor) para as listas novas do SharePoint. Roda
+// AQUI (no próprio backend, já em produção) em vez de precisar de Node.js
+// no computador de quem está fazendo a migração — basta visitar a URL com
+// a chave de admin (a mesma X-Admin-Key do painel de operadores).
+//
+//   POST /api/admin/migrar-supabase?chave=...   -> inicia (responde na hora,
+//        a migração continua rodando em segundo plano — pode demorar
+//        minutos se houver muitos lançamentos)
+//   GET  /api/admin/migrar-supabase?chave=...   -> mostra o andamento/resultado
+// ---------------------------------------------------------------------
+const SUPABASE_URL_MIGRACAO = process.env.SUPABASE_URL || 'https://klpgnaefqhsjbreiqjwe.supabase.co';
+const SUPABASE_KEY_MIGRACAO = process.env.SUPABASE_KEY || 'sb_publishable_gDdp4YFLFyggngUronBBsQ_7IawVcmO';
+const CHAVES_LISTA_MIGRACAO = {
+  equipamentos_v6: 'equipamentos', operadores_v4: 'operadores', ordens_v9: 'ordens',
+  apropriacoes_v7: 'apropriacoes', apropriacoes_rascunhos_v1: 'apropriacoesRascunhos',
+  tarifas_hora_v2: 'tarifasHora', tarifas_producao_v3: 'tarifasProducao', tarifas_verba_v1: 'tarifasVerba',
+  motivos_parada_v1: 'motivosParada', escalas_v1: 'escalas', usuarios_v1: 'usuarios',
+  producoes_v1: 'producoes', producao_notas_v1: 'producaoNotas', status_faturamento_v1: 'statusFaturamento',
+  custos_ordem_v1: 'custosOrdem', clientes_v2: 'clientes', log_auditoria_v1: 'logAuditoria'
+};
+const CHAVES_CONFIG_MIGRACAO = {
+  cliente_detalhes_v1: 'cliente_detalhes', cliente_numeros_v3: 'cliente_numeros',
+  materiais_pesagem_v1: 'materiais_pesagem', servicos_hora_v1: 'servicos_hora',
+  servicos_verba_v1: 'servicos_verba', metas_mensais_v1: 'metas_mensais',
+  descricoes_boletim_v1: 'descricoes_boletim', usuarios_ordens_restritas_v2: 'usuarios_ordens_restritas'
+};
+function ehListaDeNomesMigracao(chaveInterna) { return chaveInterna === 'clientes_v2'; }
+
+let estadoMigracao = { rodando: false, concluida: false, log: [], erro: null };
+
+function exigirChaveAdminSimples(req) {
+  const chave = req.headers['x-admin-key'] || req.query.chave || '';
+  if (!process.env.ADMIN_API_KEY || chave !== process.env.ADMIN_API_KEY) {
+    const erro = new Error('Chave de administração ausente ou inválida.');
+    erro.status = 401;
+    throw erro;
+  }
+}
+
+async function idsExistentesMigracao(listaId) {
+  const existentes = new Set();
+  let caminho = '/sites/' + SITE_ID + '/lists/' + listaId + '/items?$select=id&$expand=fields($select=Title)&$top=999';
+  while (caminho) {
+    const d = await graphGet(caminho);
+    (d.value || []).forEach(function (item) {
+      const titulo = (item.fields || {}).Title;
+      if (titulo !== undefined && titulo !== null) existentes.add(String(titulo));
+    });
+    const proximo = d['@odata.nextLink'];
+    caminho = proximo ? proximo.replace('https://graph.microsoft.com/v1.0', '') : null;
+  }
+  return existentes;
+}
+
+async function rodarMigracaoSupabase() {
+  estadoMigracao = { rodando: true, concluida: false, log: [], erro: null };
+  const registrar = (linha) => { estadoMigracao.log.push(linha); console.log('[migração] ' + linha); };
+  try {
+    registrar('Lendo dados do Supabase...');
+    const r = await fetch(SUPABASE_URL_MIGRACAO + '/rest/v1/app_storage?select=key,value', {
+      headers: { apikey: SUPABASE_KEY_MIGRACAO, Authorization: 'Bearer ' + SUPABASE_KEY_MIGRACAO }
+    });
+    if (!r.ok) throw new Error('Falha ao ler do Supabase (' + r.status + '): ' + (await r.text()));
+    const linhas = await r.json();
+    const dados = {};
+    linhas.forEach((linha) => { dados[linha.key] = linha.value; });
+    registrar(Object.keys(dados).length + ' chaves encontradas no Supabase.');
+
+    for (const chaveInterna of Object.keys(CHAVES_LISTA_MIGRACAO)) {
+      const nomeLogico = CHAVES_LISTA_MIGRACAO[chaveInterna];
+      if (!(chaveInterna in dados)) continue;
+      const listaId = idDaLista(nomeLogico);
+      if (!listaId) { registrar('PULADO: lista "' + nomeLogico + '" não tem LISTA_CTRL_..._ID configurada.'); continue; }
+      const valor = dados[chaveInterna];
+      if (!Array.isArray(valor)) { registrar('PULADO: "' + chaveInterna + '" não é uma lista.'); continue; }
+      const itens = ehListaDeNomesMigracao(chaveInterna)
+        ? valor.filter(Boolean).map((nome) => ({ id: nome, nome: nome }))
+        : valor;
+      const existentes = await idsExistentesMigracao(listaId);
+      let criados = 0, pulados = 0, semId = 0, erros = 0;
+      for (const item of itens) {
+        if (!item || item.id === undefined || item.id === null || item.id === '') { semId++; continue; }
+        const id = String(item.id);
+        if (existentes.has(id)) { pulados++; continue; }
+        try {
+          await graphPost('/sites/' + SITE_ID + '/lists/' + listaId + '/items', { fields: { Title: id, Dados: JSON.stringify(item) } });
+          existentes.add(id);
+          criados++;
+        } catch (e) { erros++; registrar('  erro ao migrar item "' + id + '" de "' + nomeLogico + '": ' + e.message); }
+      }
+      registrar('"' + nomeLogico + '": ' + criados + ' criados, ' + pulados + ' já existiam, ' + semId + ' sem id, ' + erros + ' com erro.');
+    }
+
+    const listaConfigId = idDaLista('configuracoesCtrl');
+    for (const chaveInterna of Object.keys(CHAVES_CONFIG_MIGRACAO)) {
+      const chaveConfig = CHAVES_CONFIG_MIGRACAO[chaveInterna];
+      if (!(chaveInterna in dados)) continue;
+      const valor = dados[chaveInterna];
+      if (valor === null || valor === undefined) continue;
+      if (!listaConfigId) { registrar('PULADO: configuração "' + chaveConfig + '" — lista de configurações não está configurada.'); continue; }
+      const existentes = await idsExistentesMigracao(listaConfigId);
+      if (existentes.has(chaveConfig)) { registrar('"' + chaveConfig + '": já existia — não sobrescrito.'); continue; }
+      try {
+        await graphPost('/sites/' + SITE_ID + '/lists/' + listaConfigId + '/items', { fields: { Title: chaveConfig, Dados: JSON.stringify(valor) } });
+        registrar('"' + chaveConfig + '": criado.');
+      } catch (e) { registrar('  erro ao migrar configuração "' + chaveConfig + '": ' + e.message); }
+    }
+
+    registrar('Migração concluída.');
+    estadoMigracao.concluida = true;
+  } catch (e) {
+    estadoMigracao.erro = e.message;
+    estadoMigracao.log.push('ERRO FATAL: ' + e.message);
+  } finally {
+    estadoMigracao.rodando = false;
+  }
+}
+
+app.post('/api/admin/migrar-supabase', (req, res) => {
+  try { exigirChaveAdminSimples(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  if (estadoMigracao.rodando) return res.json({ ok: true, mensagem: 'Já está rodando — consulte com GET.' });
+  rodarMigracaoSupabase(); // não espera terminar — roda em segundo plano
+  return res.json({ ok: true, mensagem: 'Migração iniciada. Consulte o andamento com GET nesta mesma URL.' });
+});
+
+app.get('/api/admin/migrar-supabase', (req, res) => {
+  try { exigirChaveAdminSimples(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+  // Visitar a URL pelo navegador já é suficiente pra iniciar (não precisa de
+  // POST) — assim quem for rodar isso só precisa colar o link uma vez, e
+  // apertar F5 depois pra ver o andamento. "?reiniciar=1" força rodar de novo.
+  if (!estadoMigracao.rodando && (!estadoMigracao.concluida || req.query.reiniciar)) {
+    rodarMigracaoSupabase();
+    return res.json({ ok: true, mensagem: 'Migração iniciada — atualize a página em alguns segundos para ver o andamento.' });
+  }
+  return res.json(estadoMigracao);
 });
 
 const PORT = process.env.PORT || 3000;
