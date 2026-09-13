@@ -17,6 +17,11 @@
  *     - Matricula  (Texto de linha única)
  *     - Cargo      (Texto de linha única)
  *
+ * Locais entra no mesmo esquema, mas sem coluna nova nenhuma — a lista
+ * Locais já é só um Title (nome do local), igual o Frota/Portal já usa pro
+ * dropdown de local do Checklist. Vira o dropdown de "Local" dentro de uma
+ * Ordem na Controladoria (antes era texto livre).
+ *
  * O "id" que a Controladoria usa (inclusive como chave estrangeira em
  * apropriações — equipamentoId/operadorId) passa a ser o ID REAL do item no
  * SharePoint (item.id, uma string), não mais um uid() gerado no navegador.
@@ -37,8 +42,9 @@ const { graphGet, graphPost, graphPatch, graphDelete, SITE_ID } = require('./gra
 
 const LISTA_FROTA_ID = process.env.LISTA_FROTA_ID;
 const LISTA_OPERADORES_ID = process.env.LISTA_OPERADORES_ID;
+const LISTA_LOCAIS_ID = process.env.LISTA_LOCAIS_ID;
 
-const NOMES_COMPARTILHADOS = { equipamentos: true, operadores: true };
+const NOMES_COMPARTILHADOS = { equipamentos: true, operadores: true, locais: true };
 function ehListaCompartilhada(nomeLogico) {
   return !!NOMES_COMPARTILHADOS[nomeLogico];
 }
@@ -52,7 +58,11 @@ function equipamentoDoItem(item) {
     id: String(item.id),
     codigo: String(f.Title || '').trim(),
     tipo: String(f.TipoEquipamento || '').trim(),
-    observacao: String(f.ObservacaoCtrl || '').trim()
+    observacao: String(f.ObservacaoCtrl || '').trim(),
+    // Local ATUAL do equipamento (mesmo campo que o tablet/Portal usam pra
+    // Movimentações) — a Controladoria usa isso pra achar sozinha a Ordem
+    // certa quando alguém escolhe um equipamento em Lançar Parte Diária.
+    local: String(f.LocalAtual || '').trim()
   };
 }
 
@@ -134,19 +144,58 @@ async function desativarOperador(idItem) {
 }
 
 // ---------------------------------------------------------------------
-// Fachada única, pelo nome lógico ("equipamentos" | "operadores")
+// Locais <-> lista Locais (só Title — mesmo dropdown do Checklist)
+// ---------------------------------------------------------------------
+function localDoItem(item) {
+  const f = item.fields || {};
+  return { id: String(item.id), nome: String(f.Title || '').trim() };
+}
+
+async function carregarLocais() {
+  const d = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_LOCAIS_ID + '/items?$expand=fields&$top=999');
+  return (d.value || []).map(localDoItem).filter(function (l) { return l.nome; });
+}
+
+async function criarLocal(item) {
+  await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_LOCAIS_ID + '/items', {
+    fields: { Title: String(item.nome || '').trim() }
+  });
+}
+
+async function atualizarLocal(idItem, item) {
+  await graphPatch('/sites/' + SITE_ID + '/lists/' + LISTA_LOCAIS_ID + '/items/' + idItem + '/fields', {
+    Title: String(item.nome || '').trim()
+  });
+}
+
+async function excluirLocal(idItem) {
+  await graphDelete('/sites/' + SITE_ID + '/lists/' + LISTA_LOCAIS_ID + '/items/' + idItem);
+}
+
+// ---------------------------------------------------------------------
+// Fachada única, pelo nome lógico ("equipamentos" | "operadores" | "locais")
 // ---------------------------------------------------------------------
 async function carregar(nomeLogico) {
-  return nomeLogico === 'equipamentos' ? carregarEquipamentos() : carregarOperadores();
+  if (nomeLogico === 'equipamentos') return carregarEquipamentos();
+  if (nomeLogico === 'locais') return carregarLocais();
+  return carregarOperadores();
 }
 async function criar(nomeLogico, item) {
-  return nomeLogico === 'equipamentos' ? criarEquipamento(item) : criarOperador(item);
+  if (nomeLogico === 'equipamentos') return criarEquipamento(item);
+  if (nomeLogico === 'locais') return criarLocal(item);
+  return criarOperador(item);
 }
 async function atualizar(nomeLogico, idItem, item) {
-  return nomeLogico === 'equipamentos' ? atualizarEquipamento(idItem, item) : atualizarOperador(idItem, item);
+  if (nomeLogico === 'equipamentos') return atualizarEquipamento(idItem, item);
+  if (nomeLogico === 'locais') return atualizarLocal(idItem, item);
+  return atualizarOperador(idItem, item);
 }
 async function excluir(nomeLogico, idItem) {
-  return nomeLogico === 'equipamentos' ? excluirEquipamento(idItem) : desativarOperador(idItem);
+  if (nomeLogico === 'equipamentos') return excluirEquipamento(idItem);
+  // Locais: apaga de verdade (mesmo comportamento do equipamento) — é só um
+  // nome, sem histórico dependente dele como o operador tem (login/apontamento).
+  if (nomeLogico === 'locais') return excluirLocal(idItem);
+  return desativarOperador(idItem);
 }
 
 module.exports = { ehListaCompartilhada, carregar, criar, atualizar, excluir };
