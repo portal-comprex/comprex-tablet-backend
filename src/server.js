@@ -156,7 +156,10 @@ app.get('/api/dados-iniciais', async (req, res) => {
 // nunca dá erro só por falta de foto, pra não travar o checklist.
 // ---------------------------------------------------------------------
 app.get('/api/foto-equipamento/:codigo', async (req, res) => {
-  try { exigirOperadorLogado(req); }
+  // Aceita tanto o token do operador de campo (tablet) quanto a sessão
+  // Microsoft/Portal da Controladoria — a Controladoria também usa esta foto
+  // (mesma ideia do Checklist) ao escolher um equipamento em Lançar Parte Diária.
+  try { await exigirSessaoControladoria(req); }
   catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
 
   try {
