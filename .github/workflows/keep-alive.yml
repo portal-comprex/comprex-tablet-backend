@@ -1,0 +1,28 @@
+name: Manter servidor acordado
+
+# O plano gratuito do Render "dorme" o servidor depois de um tempo sem uso, e
+# a primeira chamada depois disso demora de 30 a 60s pra acordar — é essa
+# demora que aparece pro operador ao abrir a Parte Diária. Este workflow
+# chama a rota pública /api/health a cada 10 minutos, dentro do horário de
+# expediente, só pra manter o servidor sempre acordado e evitar essa espera.
+#
+# Como instalar: crie o arquivo .github/workflows/keep-alive.yml no
+# repositório comprex-tablet-backend com este conteúdo.
+
+on:
+  schedule:
+    # A cada 10 minutos, de segunda a sábado, das 07h às 19h (horário de
+    # Brasília = UTC-3, por isso 10h–22h em UTC). Ajuste se o expediente for
+    # diferente. Fora desse horário o servidor pode dormir normalmente — não
+    # tem custo em deixá-lo dormir quando ninguém vai usar mesmo.
+    - cron: '*/10 10-21 * * 1-6'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chamar /api/health
+        run: |
+          curl -sS -o /dev/null -w "status: %{http_code}\n" \
+            "https://comprex-tablet-backend.onrender.com/api/health" || true
