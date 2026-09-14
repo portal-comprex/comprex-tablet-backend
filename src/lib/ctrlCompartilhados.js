@@ -117,7 +117,13 @@ function operadorDoItem(item) {
     matricula: String(f.Matricula || '').trim(),
     nome: String(f.Title || '').trim(),
     cargo: String(f.Cargo || '').trim(),
-    ativo: !(ativoTexto === 'não' || ativoTexto === 'nao' || ativoTexto === 'false')
+    ativo: !(ativoTexto === 'não' || ativoTexto === 'nao' || ativoTexto === 'false'),
+    // Nome de usuário do login do tablet, se já tiver sido definido (nunca a
+    // senha/hash — isso não sai daqui). Serve pra Controladoria MOSTRAR se o
+    // operador já tem login configurado e com qual usuário, em vez da tela
+    // ficar cega sobre isso e a pessoa só descobrir na base de tentativa e
+    // erro (foi o que causava o "já existe esse usuário" parecendo bug).
+    usuario: String(f.Usuario || '').trim()
   };
 }
 
