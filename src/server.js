@@ -473,6 +473,67 @@ async function localizarItemPorId(listaId, idLogico) {
   return (d.value || [])[0] || null;
 }
 
+async function carregarListaGenericaCtrl(nomeLogico) {
+  if (ctrlCompartilhados.ehListaCompartilhada(nomeLogico)) {
+    return ctrlCompartilhados.carregar(nomeLogico);
+  }
+  const listaId = idDaLista(nomeLogico);
+  if (!listaId) return null;
+  const d = await graphGet('/sites/' + SITE_ID + '/lists/' + listaId + '/items?$expand=fields&$top=999');
+  return (d.value || []).map(function (item) {
+    try { return JSON.parse((item.fields || {}).Dados || 'null'); }
+    catch (e) { return null; }
+  }).filter(function (x) { return x !== null; });
+}
+
+async function carregarConfigGenericaCtrl(chave) {
+  const listaId = idDaLista('configuracoesCtrl');
+  if (!listaId) return null;
+  const achado = await localizarItemPorId(listaId, chave);
+  if (!achado) return null;
+  try { return JSON.parse((achado.fields || {}).Dados || 'null'); }
+  catch (e) { return null; }
+}
+
+// GET /api/ctrl/dados-iniciais?modoCampo=1  -> { perfil, listas:{...}, configs:{...} }
+//
+// Junta num pacote só as listas que o operador de campo precisa pra abrir a
+// Parte Diária — antes eram ~11 requisições separadas (uma por lista, cada
+// uma disparando sua própria chamada ao SharePoint), cada uma tendo que
+// esperar a mesma instância do Render acordar; agora é 1 requisição só, com
+// as chamadas ao SharePoint em paralelo aqui dentro (mesmo padrão que já
+// funciona bem pro Checklist em /api/dados-iniciais). PRECISA vir definida
+// ANTES de "/api/ctrl/:lista" abaixo, senão o Express entenderia
+// "dados-iniciais" como se fosse o nome de uma lista.
+const CTRL_BUNDLE_CHAVES_CAMPO = ['equipamentos', 'ordens', 'apropriacoes', 'apropriacoesRascunhos', 'operadores', 'tarifasHora', 'tarifasProducao', 'motivosParada', 'escalas', 'clientes'];
+const CTRL_BUNDLE_CHAVES_EXTRA = ['tarifasVerba', 'usuarios', 'producoes', 'producaoNotas', 'statusFaturamento', 'custosOrdem', 'logAuditoria', 'locais'];
+const CTRL_BUNDLE_CONFIG_CAMPO = ['cliente_numeros'];
+const CTRL_BUNDLE_CONFIG_EXTRA = ['cliente_detalhes', 'materiais_pesagem', 'servicos_hora', 'servicos_verba', 'metas_mensais', 'descricoes_boletim', 'usuarios_ordens_restritas'];
+app.get('/api/ctrl/dados-iniciais', async (req, res) => {
+  let sessao;
+  try { sessao = await exigirSessaoControladoria(req); }
+  catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
+
+  const modoCampo = String(req.query.modoCampo) === '1';
+  const chaves = modoCampo ? CTRL_BUNDLE_CHAVES_CAMPO : CTRL_BUNDLE_CHAVES_CAMPO.concat(CTRL_BUNDLE_CHAVES_EXTRA);
+  const configs = modoCampo ? CTRL_BUNDLE_CONFIG_CAMPO : CTRL_BUNDLE_CONFIG_CAMPO.concat(CTRL_BUNDLE_CONFIG_EXTRA);
+
+  try {
+    const [listasResp, configsResp] = await Promise.all([
+      Promise.all(chaves.map(function (k) { return carregarListaGenericaCtrl(k).catch(function () { return null; }); })),
+      Promise.all(configs.map(function (k) { return carregarConfigGenericaCtrl(k).catch(function () { return null; }); }))
+    ]);
+    const listas = {};
+    chaves.forEach(function (k, i) { listas[k] = listasResp[i]; });
+    const configsOut = {};
+    configs.forEach(function (k, i) { configsOut[k] = configsResp[i]; });
+    return res.json({ perfil: sessao.perfil, listas: listas, configs: configsOut });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ erro: 'Erro ao carregar dados iniciais da Controladoria: ' + err.message });
+  }
+});
+
 // GET /api/ctrl/:lista  -> { itens: [...] }
 app.get('/api/ctrl/:lista', async (req, res) => {
   try { await exigirSessaoControladoria(req); }
