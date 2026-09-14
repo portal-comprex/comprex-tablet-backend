@@ -123,7 +123,13 @@ function operadorDoItem(item) {
     // operador já tem login configurado e com qual usuário, em vez da tela
     // ficar cega sobre isso e a pessoa só descobrir na base de tentativa e
     // erro (foi o que causava o "já existe esse usuário" parecendo bug).
-    usuario: String(f.Usuario || '').trim()
+    usuario: String(f.Usuario || '').trim(),
+    // Código (não id — o Checklist do tablet usa uma lista de frota separada,
+    // sem id estável, então o código é a única chave que as duas telas
+    // enxergam igual) do último equipamento que esse operador usou, tanto no
+    // Checklist quanto na Parte Diária — só serve pra pré-selecionar da
+    // próxima vez que ele entrar, em qualquer aparelho.
+    ultimoEquipamentoCodigo: String(f.UltimoEquipamentoCodigo || '').trim()
   };
 }
 
