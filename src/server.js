@@ -21,6 +21,13 @@ const LISTA_CHECKLISTS_ID = process.env.LISTA_CHECKLISTS_ID;
 const LISTA_PARTE_DIARIA_ID = process.env.LISTA_PARTE_DIARIA_ID;
 const TIPOS_PARADA_PADRAO = ['ALMOÇO', 'REVISÃO PREVENTIVA', 'MANUTENÇÃO CORRETIVA', 'PARADA TÉCNICA', 'EM DISPONIBILIDADE'];
 
+// Tamanho mínimo da senha do LOGIN DO TABLET (operador de campo).
+// Era 6 e passou para 5 a pedido do Lucas: a senha dos operadores é formada
+// pelos primeiros dígitos do CPF, e a importação em massa de 318 operadores
+// era recusada por esta regra. Vale só para o login do tablet — a conta do
+// Escritório é a conta Microsoft e não passa por aqui.
+const MIN_SENHA_TABLET = 5;
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -336,8 +343,8 @@ app.post('/api/admin/operadores', async (req, res) => {
   if (!nome || !usuario || !senha) {
     return res.status(400).json({ erro: 'Informe nome, usuário e senha.' });
   }
-  if (senha.length < 6) {
-    return res.status(400).json({ erro: 'A senha precisa ter pelo menos 6 caracteres.' });
+  if (senha.length < MIN_SENHA_TABLET) {
+    return res.status(400).json({ erro: 'A senha precisa ter pelo menos ' + MIN_SENHA_TABLET + ' caracteres.' });
   }
   try {
     const existentes = await graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items?$expand=fields&$top=999');
@@ -368,7 +375,7 @@ app.patch('/api/admin/operadores/:id', async (req, res) => {
   const body = req.body || {};
   const campos = {};
   if (typeof body.senha === 'string' && body.senha) {
-    if (body.senha.length < 6) return res.status(400).json({ erro: 'A senha precisa ter pelo menos 6 caracteres.' });
+    if (body.senha.length < MIN_SENHA_TABLET) return res.status(400).json({ erro: 'A senha precisa ter pelo menos ' + MIN_SENHA_TABLET + ' caracteres.' });
     campos.SenhaHash = hashSenha(body.senha);
   }
   if (typeof body.ativo === 'boolean') {
@@ -431,7 +438,7 @@ app.patch('/api/ctrl/operadores/:id/senha', async (req, res) => {
   const usuario = String((req.body || {}).usuario || '').trim().toLowerCase();
   const senha = String((req.body || {}).senha || '');
   if (!senha) return res.status(400).json({ erro: 'Informe a senha.' });
-  if (senha.length < 6) return res.status(400).json({ erro: 'A senha precisa ter pelo menos 6 caracteres.' });
+  if (senha.length < MIN_SENHA_TABLET) return res.status(400).json({ erro: 'A senha precisa ter pelo menos ' + MIN_SENHA_TABLET + ' caracteres.' });
   const id = req.params.id;
   try {
     const campos = { SenhaHash: hashSenha(senha) };
