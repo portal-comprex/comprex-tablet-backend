@@ -7,8 +7,8 @@
  *   LISTA_MOVIMENTACOES_ID, LISTA_MECANICOS_ID
  */
 const TZ = 'America/Sao_Paulo';
-const NOMES = { ocorrencias: 'ManutOcorrencias', pecas: 'ManutPecas', eventos: 'ManutEventos', mecanicos: 'Mecanicos' };
-const ENV_IDS = { ocorrencias: 'LISTA_MANUT_OCORRENCIAS_ID', pecas: 'LISTA_MANUT_PECAS_ID', eventos: 'LISTA_MANUT_EVENTOS_ID', mecanicos: 'LISTA_MECANICOS_ID' };
+const NOMES = { ocorrencias: 'ManutOcorrencias', pecas: 'ManutPecas', eventos: 'ManutEventos', mecanicos: 'Mecanicos', apontamentos: 'ManutApontamentos' };
+const ENV_IDS = { ocorrencias: 'LISTA_MANUT_OCORRENCIAS_ID', pecas: 'LISTA_MANUT_PECAS_ID', eventos: 'LISTA_MANUT_EVENTOS_ID', mecanicos: 'LISTA_MECANICOS_ID', apontamentos: 'LISTA_MANUT_APONTAMENTOS_ID' };
 const NOMES_MOVIMENTACOES = ['Movimentações', 'Movimentacoes', 'Movimentação', 'Movimentacao'];
 const ETAPAS_INICIAIS = ['Diagnóstico', 'Em manutenção', 'Aguardando peça', 'Serviço Téc Especializado'];
 const ETAPAS = ['Diagnóstico', 'Em manutenção', 'Aguardando peça', 'Reparo externo', 'Serviço Téc Especializado', 'Montagem/Testes'];
@@ -17,7 +17,8 @@ const OBRIGATORIAS = {
   ocorrencias: ['Title', 'DataEntrada', 'Etapa', 'Motivo', 'Responsavel', 'PrevisaoRetorno', 'DataSaida', 'Situacao', 'Observacao'],
   pecas: ['Title', 'OcorrenciaId', 'Equipamento', 'Situacao', 'Destino', 'DataEnvio', 'PrevisaoOriginal', 'PrevisaoRetorno', 'RetornoReal', 'Documento', 'Custo'],
   eventos: ['Title', 'OcorrenciaId', 'Equipamento', 'Data', 'Responsavel', 'Realizado'],
-  mecanicos: []
+  mecanicos: [],
+  apontamentos: ['Title', 'OcorrenciaId', 'Mecanico', 'Matricula', 'Terceiro', 'Inicio', 'Fim']
 };
 
 function criar(deps) {
@@ -162,6 +163,38 @@ function criar(deps) {
   function num(v) { if (v === null || v === undefined || v === '') return null; const n = Number(String(v).replace(',', '.')); return isFinite(n) ? n : null; }
   function txt(v, max) { const t = String(v == null ? '' : v).trim(); return max && t.length > max ? t.slice(0, max - 1) + '…' : t; }
 
+  /* ---------- períodos de atuação do mecânico (ManutApontamentos) ---------- */
+  const FIM_EXPEDIENTE = process.env.EXPEDIENTE_FIM || '17:00';
+  function fimDoExpediente(iso) {
+    const p = partesSP(iso);
+    return new Date(p.d + 'T' + FIM_EXPEDIENTE + ':00-03:00').getTime();
+  }
+  function chaveMec(b) { const m = String(b.mecanicoMatricula || '').replace(/\D/g, '').replace(/^0+/, ''); return m ? 'm' + m : 'n' + norm(b.mecanicoNome); }
+  function chaveDeLinha(f) { const m = String(f.Matricula || '').replace(/\D/g, '').replace(/^0+/, ''); return m ? 'm' + m : 'n' + norm(f.Mecanico); }
+  async function periodos() {
+    const itens = await itensDe('apontamentos');
+    const out = [];
+    for (const it of itens) { const f = await ler('apontamentos', it); out.push({ id: it.id, f: f, ini: Date.parse(f.Inicio || ''), fim: f.Fim ? Date.parse(f.Fim) : null }); }
+    return out;
+  }
+  /* Esqueceu de pausar? O período aberto fecha sozinho no fim do expediente do dia em que começou. */
+  async function varrerEsquecidos(lista) {
+    const agora = Date.now();
+    for (const p of lista) {
+      if (p.fim !== null || !isFinite(p.ini)) continue;
+      const limite = Math.max(p.ini, fimDoExpediente(new Date(p.ini).toISOString()));
+      if (agora > limite) {
+        await atualizarItem('apontamentos', p.id, { Fim: new Date(limite).toISOString() });
+        p.fim = limite;
+      }
+    }
+  }
+  async function fecharPeriodo(p, quandoMs) {
+    const fim = Math.max(p.ini, quandoMs);
+    await atualizarItem('apontamentos', p.id, { Fim: new Date(fim).toISOString() });
+    p.fim = fim;
+  }
+
   async function ocorrenciaPorId(id) {
     const itens = await itensDe('ocorrencias');
     const it = itens.find(function (i) { return String(i.id) === String(id); });
@@ -238,6 +271,10 @@ function criar(deps) {
         const k = String(f.OcorrenciaId || '');
         if (!pendPorOc[k]) pendPorOc[k] = f.Title || '';
       }
+      let ap = [];
+      try { ap = await periodos(); await varrerEsquecidos(ap); } catch (e) { ap = []; }
+      const atuandoPorOc = {};
+      ap.forEach(function (p) { if (p.fim === null) (atuandoPorOc[String(p.f.OcorrenciaId || '')] = atuandoPorOc[String(p.f.OcorrenciaId || '')] || []).push({ mecanico: p.f.Mecanico || '', matricula: p.f.Matricula || '', desde: new Date(p.ini).toISOString() }); });
       const abertas = [], concluidas = [], abertasEq = {};
       for (const it of itens) {
         const f = await ler('ocorrencias', it);
@@ -245,7 +282,7 @@ function criar(deps) {
         if (String(f.Situacao || 'Aberta') === 'Concluída') { concluidas.push({ id: it.id, eq: eq, f: f }); continue; }
         abertasEq[eq.toUpperCase()] = true;
         abertas.push({ id: it.id, equipamento: eq, descricao: desc[eq.toUpperCase()] || '', motivo: f.Motivo || '', mecanico: f.Responsavel || '',
-          etapa: f.Etapa || 'Diagnóstico', peca: pendPorOc[String(it.id)] || '', previsao: ymd(f.PrevisaoRetorno), paradaEm: paraIso(ymd(f.DataParada) || ymd(f.DataEntrada), f.HoraParada || f.HoraEntrada) });
+          etapa: f.Etapa || 'Diagnóstico', atuando: atuandoPorOc[String(it.id)] || [], peca: pendPorOc[String(it.id)] || '', previsao: ymd(f.PrevisaoRetorno), paradaEm: paraIso(ymd(f.DataParada) || ymd(f.DataEntrada), f.HoraParada || f.HoraEntrada) });
       }
       abertas.sort(function (a, b) { return String(a.paradaEm).localeCompare(String(b.paradaEm)); });
       // Disponíveis: liberados que continuam na manutenção (última ficha do equipamento, sem envio ao contrato)
@@ -314,6 +351,41 @@ function criar(deps) {
       res.json({ ok: true });
     }));
 
+    // ---- mecânico começa a atuar no equipamento (fecha sozinho a atuação dele em outro) ----
+    app.post('/api/manutencao/atuacao/iniciar', auth(async function (req, res) {
+      const b = req.body || {};
+      if (!txt(b.mecanicoNome)) throw erro(400, 'Informe o mecânico.');
+      const oc = await ocorrenciaPorId(b.ocorrenciaId);
+      const eq = String(oc.f.Title || b.equipamento || '').trim();
+      const quando = partesSP(b.quando).ms;
+      const lista = await periodos();
+      await varrerEsquecidos(lista);
+      const k = chaveMec(b);
+      let jaAtuando = false;
+      for (const p of lista) {
+        if (p.fim !== null || chaveDeLinha(p.f) !== k) continue;
+        if (String(p.f.OcorrenciaId || '') === String(oc.id)) { jaAtuando = true; continue; }
+        await fecharPeriodo(p, quando); // pausa automática no outro equipamento
+      }
+      if (!jaAtuando) {
+        await criarItem('apontamentos', { Title: eq, OcorrenciaId: String(oc.id), Mecanico: quem(b), Matricula: txt(b.mecanicoMatricula), Terceiro: b.terceiro ? 'Sim' : 'Não', Inicio: new Date(quando).toISOString(), Fim: '' });
+      }
+      res.json({ ok: true });
+    }));
+
+    // ---- mecânico pausa a atuação (o equipamento continua parado) ----
+    app.post('/api/manutencao/atuacao/pausar', auth(async function (req, res) {
+      const b = req.body || {};
+      const quando = partesSP(b.quando).ms;
+      const lista = await periodos();
+      await varrerEsquecidos(lista);
+      const k = chaveMec(b);
+      for (const p of lista) {
+        if (p.fim === null && chaveDeLinha(p.f) === k && String(p.f.OcorrenciaId || '') === String(b.ocorrenciaId)) await fecharPeriodo(p, quando);
+      }
+      res.json({ ok: true });
+    }));
+
     // ---- liberar equipamento (encerra a parada) ----
     app.post('/api/manutencao/concluir', auth(async function (req, res, sessao) {
       const b = req.body || {};
@@ -335,6 +407,10 @@ function criar(deps) {
           Data: lib.d + 'T12:00:00', Usuario: sessao.nome || '', Observacao: 'Manutenção concluída — lançada no tablet · disponível na manutenção' + (comPend ? ' · liberado COM pendência: ' + txt(b.pendencia) : ' · liberado sem pendência'),
           ResponsavelTecnico: oc.f.Responsavel || '' });
       }
+      try {
+        const abertos = (await periodos()).filter(function (p) { return p.fim === null && String(p.f.OcorrenciaId || '') === String(oc.id); });
+        for (const p of abertos) await fecharPeriodo(p, lib.ms);
+      } catch (e) { console.warn('[manutencao] não foi possível fechar os períodos de atuação:', e.message); }
       await atualizarItem('ocorrencias', oc.id, { Situacao: 'Concluída', DataSaida: lib.d, HoraSaida: lib.h, HorimetroSaida: horimS, DestinoLiberacao: 'Disponível na manutenção', ContratoDestino: '',
         Observacao: [oc.f.Observacao || '', 'Conclusão: ' + txt(b.servico), comPend ? '[PENDÊNCIA] ' + txt(b.pendencia).replace(/\n+/g, ' ') : ''].filter(Boolean).join('\n') });
       await evento(oc.id, eq, 'Equipamento liberado ' + (comPend ? 'COM pendência' : 'sem pendência') + ' — por ' + quem(b) + ' — ' + txt(b.servico), quem(b), lib.d);
