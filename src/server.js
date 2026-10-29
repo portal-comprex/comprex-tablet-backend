@@ -29,6 +29,23 @@ const TIPOS_PARADA_PADRAO = ['ALMOÇO', 'REVISÃO PREVENTIVA', 'MANUTENÇÃO COR
 // Escritório é a conta Microsoft e não passa por aqui.
 const MIN_SENHA_TABLET = 5;
 
+// Abas do tablet que cada login pode usar. Fica na coluna "Abas" (texto) da lista
+// Operadores, ex.: "checklist,partediaria,manutencao". Sem nada gravado (logins
+// antigos), vale o padrão de sempre: Checklist + Parte Diária.
+const ABAS_VALIDAS = ['checklist', 'partediaria', 'manutencao'];
+const ABAS_PADRAO = ['checklist', 'partediaria'];
+function lerAbas(valor) {
+  const lista = String(valor || '').split(',').map(function (a) { return a.trim().toLowerCase(); })
+    .filter(function (a, i, arr) { return ABAS_VALIDAS.indexOf(a) !== -1 && arr.indexOf(a) === i; });
+  return lista.length ? lista : ABAS_PADRAO.slice();
+}
+function validarAbas(entrada) {
+  if (!Array.isArray(entrada)) return null;
+  const lista = entrada.map(function (a) { return String(a).trim().toLowerCase(); })
+    .filter(function (a, i, arr) { return ABAS_VALIDAS.indexOf(a) !== -1 && arr.indexOf(a) === i; });
+  return lista.length ? lista : null;
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
@@ -69,7 +86,7 @@ app.post('/api/login', async (req, res) => {
     limparTentativas(usuario);
     const nome = String(item.fields.Title || usuario).trim();
     const token = assinarToken({ sub: item.id, usuario, nome, role: 'operador' });
-    return res.json({ token, nome });
+    return res.json({ token, nome, abas: lerAbas(item.fields.Abas) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao verificar login. Tente novamente em instantes.' });
@@ -156,6 +173,7 @@ app.get('/api/dados-iniciais', async (req, res) => {
     return res.json({
       operadorLogado: sessao.nome,
       meuUltimoEquipamento,
+      abas: lerAbas(itemOperadorLogado ? (itemOperadorLogado.fields || {}).Abas : ''),
       frotas,
       locais,
       operadores,
@@ -324,6 +342,7 @@ app.get('/api/admin/operadores', async (req, res) => {
           usuario: f.Usuario || '',
           temLoginTablet: !!f.Usuario,
           ativo: ativo !== 'não' && ativo !== 'nao' && ativo !== 'false',
+          abas: lerAbas(f.Abas),
           online: presenca.online,
           ultimoAcesso: presenca.ultimoAcesso // timestamp em ms, ou null se nunca logou desde que o backend subiu
         };
@@ -357,10 +376,19 @@ app.post('/api/admin/operadores', async (req, res) => {
     if (jaExiste) {
       return res.status(409).json({ erro: 'Já existe um operador com esse nome de usuário.' });
     }
-    const criado = await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items', {
-      fields: { Title: nome, Usuario: usuario, SenhaHash: hashSenha(senha), Ativo: 'Sim' }
-    });
-    return res.json({ ok: true, id: criado.id });
+    const abas = validarAbas(body.abas) || ABAS_PADRAO.slice();
+    const campos = { Title: nome, Usuario: usuario, SenhaHash: hashSenha(senha), Ativo: 'Sim', Abas: abas.join(',') };
+    let criado, aviso = null;
+    try {
+      criado = await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items', { fields: campos });
+    } catch (e1) {
+      if (!/Abas/i.test(String(e1 && e1.message))) throw e1;
+      // coluna "Abas" ainda não existe na lista Operadores: cria o login sem ela
+      delete campos.Abas;
+      criado = await graphPost('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items', { fields: campos });
+      aviso = 'Login criado, mas a coluna "Abas" não existe na lista Operadores do SharePoint — as abas não foram gravadas (vale o padrão: Checklist e Parte Diária).';
+    }
+    return res.json({ ok: true, id: criado.id, aviso: aviso });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ erro: 'Erro ao criar operador: ' + err.message });
@@ -384,14 +412,20 @@ app.patch('/api/admin/operadores/:id', async (req, res) => {
   if (typeof body.ativo === 'boolean') {
     campos.Ativo = body.ativo ? 'Sim' : 'Não';
   }
+  if (body.abas !== undefined) {
+    const abas = validarAbas(body.abas);
+    if (!abas) return res.status(400).json({ erro: 'Marque pelo menos uma aba para este login.' });
+    campos.Abas = abas.join(',');
+  }
   if (!Object.keys(campos).length) {
-    return res.status(400).json({ erro: 'Nada para atualizar — envie "senha" e/ou "ativo".' });
+    return res.status(400).json({ erro: 'Nada para atualizar — envie "senha", "ativo" e/ou "abas".' });
   }
   try {
     await graphPatch('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items/' + id + '/fields', campos);
     return res.json({ ok: true });
   } catch (err) {
     console.error(err);
+    if (/Abas/i.test(String(err && err.message))) return res.status(500).json({ erro: 'Falta criar a coluna "Abas" (texto de uma linha) na lista Operadores do SharePoint.' });
     return res.status(500).json({ erro: 'Erro ao atualizar operador: ' + err.message });
   }
 });
