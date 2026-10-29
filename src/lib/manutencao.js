@@ -7,8 +7,8 @@
  *   LISTA_MOVIMENTACOES_ID, LISTA_MECANICOS_ID
  */
 const TZ = 'America/Sao_Paulo';
-const NOMES = { ocorrencias: 'ManutOcorrencias', pecas: 'ManutPecas', eventos: 'ManutEventos', mecanicos: 'Mecanicos', apontamentos: 'ManutApontamentos' };
-const ENV_IDS = { ocorrencias: 'LISTA_MANUT_OCORRENCIAS_ID', pecas: 'LISTA_MANUT_PECAS_ID', eventos: 'LISTA_MANUT_EVENTOS_ID', mecanicos: 'LISTA_MECANICOS_ID', apontamentos: 'LISTA_MANUT_APONTAMENTOS_ID' };
+const NOMES = { ocorrencias: 'ManutOcorrencias', pecas: 'ManutPecas', eventos: 'ManutEventos', mecanicos: 'Mecanicos', apontamentos: 'ManutApontamentos', itens: 'ManutItens' };
+const ENV_IDS = { ocorrencias: 'LISTA_MANUT_OCORRENCIAS_ID', pecas: 'LISTA_MANUT_PECAS_ID', eventos: 'LISTA_MANUT_EVENTOS_ID', mecanicos: 'LISTA_MECANICOS_ID', apontamentos: 'LISTA_MANUT_APONTAMENTOS_ID', itens: 'LISTA_MANUT_ITENS_ID' };
 const NOMES_MOVIMENTACOES = ['Movimentações', 'Movimentacoes', 'Movimentação', 'Movimentacao'];
 const ETAPAS_INICIAIS = ['Diagnóstico', 'Em manutenção', 'Aguardando peça', 'Serviço Téc Especializado'];
 const ETAPAS = ['Diagnóstico', 'Em manutenção', 'Aguardando peça', 'Reparo externo', 'Serviço Téc Especializado', 'Montagem/Testes'];
@@ -18,7 +18,8 @@ const OBRIGATORIAS = {
   pecas: ['Title', 'OcorrenciaId', 'Equipamento', 'Situacao', 'Destino', 'DataEnvio', 'PrevisaoOriginal', 'PrevisaoRetorno', 'RetornoReal', 'Documento', 'Custo'],
   eventos: ['Title', 'OcorrenciaId', 'Equipamento', 'Data', 'Responsavel', 'Realizado'],
   mecanicos: [],
-  apontamentos: ['Title', 'OcorrenciaId', 'Mecanico', 'Matricula', 'Terceiro', 'Inicio', 'Fim']
+  apontamentos: ['Title', 'OcorrenciaId', 'Mecanico', 'Matricula', 'Terceiro', 'Inicio', 'Fim'],
+  itens: []
 };
 
 function criar(deps) {
@@ -271,6 +272,15 @@ function criar(deps) {
         const k = String(f.OcorrenciaId || '');
         if (!pendPorOc[k]) pendPorOc[k] = f.Title || '';
       }
+      const probPorOc = {};
+      try {
+        for (const p of await itensDe('itens')) {
+          const f = await ler('itens', p);
+          const k = String(f.OcorrenciaId || '');
+          if (!k || !String(f.Title || '').trim()) continue;
+          (probPorOc[k] = probPorOc[k] || []).push({ texto: String(f.Title).trim(), status: String(f.Status || 'Pendente') });
+        }
+      } catch (e) { /* lista de itens é opcional */ }
       let ap = [];
       try { ap = await periodos(); await varrerEsquecidos(ap); } catch (e) { ap = []; }
       const atuandoPorOc = {};
@@ -282,7 +292,7 @@ function criar(deps) {
         if (String(f.Situacao || 'Aberta') === 'Concluída') { concluidas.push({ id: it.id, eq: eq, f: f }); continue; }
         abertasEq[eq.toUpperCase()] = true;
         abertas.push({ id: it.id, equipamento: eq, descricao: desc[eq.toUpperCase()] || '', motivo: f.Motivo || '', mecanico: f.Responsavel || '',
-          etapa: f.Etapa || 'Diagnóstico', atuando: atuandoPorOc[String(it.id)] || [], peca: pendPorOc[String(it.id)] || '', previsao: ymd(f.PrevisaoRetorno), paradaEm: paraIso(ymd(f.DataParada) || ymd(f.DataEntrada), f.HoraParada || f.HoraEntrada) });
+          etapa: f.Etapa || 'Diagnóstico', atuando: atuandoPorOc[String(it.id)] || [], problemas: probPorOc[String(it.id)] || [], observacao: String(f.Observacao || '').replace(/\[PENDÊNCIA\]/g, 'Pendência:'), dataEnvio: ymd(f.DataEnvioContrato), dataEntrada: ymd(f.DataEntrada), dataParada: ymd(f.DataParada), peca: pendPorOc[String(it.id)] || '', previsao: ymd(f.PrevisaoRetorno), paradaEm: paraIso(ymd(f.DataParada) || ymd(f.DataEntrada), f.HoraParada || f.HoraEntrada) });
       }
       abertas.sort(function (a, b) { return String(a.paradaEm).localeCompare(String(b.paradaEm)); });
       // Disponíveis: liberados que continuam na manutenção (última ficha do equipamento, sem envio ao contrato)
