@@ -12,6 +12,7 @@ const { exigirContaMicrosoft } = require('./lib/msalAuth');
 const { exigirPermissaoControladoria } = require('./lib/ctrlPermissoes');
 const { idDaLista } = require('./lib/ctrlLists');
 const ctrlCompartilhados = require('./lib/ctrlCompartilhados');
+const manutencao = require('./lib/manutencao').criar({ graphGet, graphPost, graphPatch, SITE_ID, exigirOperadorLogado, LISTA_FROTA_ID: process.env.LISTA_FROTA_ID });
 
 const LISTA_OPERADORES_ID = process.env.LISTA_OPERADORES_ID;
 const LISTA_FROTA_ID = process.env.LISTA_FROTA_ID;
@@ -113,12 +114,13 @@ app.get('/api/dados-iniciais', async (req, res) => {
   catch (e) { return res.status(e.status || 401).json({ erro: e.message }); }
 
   try {
-    const [frotaResp, locaisResp, operadoresResp, checklistDef, tiposParada] = await Promise.all([
+    const [frotaResp, locaisResp, operadoresResp, checklistDef, tiposParada, mecanicos] = await Promise.all([
       graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_FROTA_ID + '/items?$expand=fields&$top=999'),
       graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_LOCAIS_ID + '/items?$expand=fields&$top=999'),
       graphGet('/sites/' + SITE_ID + '/lists/' + LISTA_OPERADORES_ID + '/items?$expand=fields&$top=999'),
       carregarItensChecklist(),
-      carregarTiposParada()
+      carregarTiposParada(),
+      manutencao.carregarMecanicos()
     ]);
 
     const frotas = (frotaResp.value || []).map(function (item) {
@@ -158,6 +160,7 @@ app.get('/api/dados-iniciais', async (req, res) => {
       locais,
       operadores,
       tiposParada,
+      mecanicos,
       checklist: checklistDef
     });
   } catch (err) {
@@ -952,6 +955,9 @@ app.get('/api/admin/migrar-supabase', (req, res) => {
   }
   return res.json(estadoMigracao);
 });
+
+// Rotas de MANUTENÇÃO do tablet (abrir parada, paradas em aberto, situação, intervenção, novo problema, liberar)
+manutencao.registrar(app);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
