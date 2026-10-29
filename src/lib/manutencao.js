@@ -10,10 +10,11 @@ const TZ = 'America/Sao_Paulo';
 const NOMES = { ocorrencias: 'ManutOcorrencias', pecas: 'ManutPecas', eventos: 'ManutEventos', mecanicos: 'Mecanicos' };
 const ENV_IDS = { ocorrencias: 'LISTA_MANUT_OCORRENCIAS_ID', pecas: 'LISTA_MANUT_PECAS_ID', eventos: 'LISTA_MANUT_EVENTOS_ID', mecanicos: 'LISTA_MECANICOS_ID' };
 const NOMES_MOVIMENTACOES = ['Movimentações', 'Movimentacoes', 'Movimentação', 'Movimentacao'];
+const ETAPAS_INICIAIS = ['Diagnóstico', 'Em manutenção', 'Aguardando peça', 'Serviço Téc Especializado'];
 const ETAPAS = ['Diagnóstico', 'Em manutenção', 'Aguardando peça', 'Reparo externo', 'Serviço Téc Especializado', 'Montagem/Testes'];
 // colunas que o Portal exige em cada lista; as demais são opcionais (ignoradas se não existirem)
 const OBRIGATORIAS = {
-  ocorrencias: ['Title', 'DataEntrada', 'Etapa', 'Motivo', 'Tipo', 'Responsavel', 'PrevisaoRetorno', 'DataSaida', 'Situacao', 'Observacao'],
+  ocorrencias: ['Title', 'DataEntrada', 'Etapa', 'Motivo', 'Responsavel', 'PrevisaoRetorno', 'DataSaida', 'Situacao', 'Observacao'],
   pecas: ['Title', 'OcorrenciaId', 'Equipamento', 'Situacao', 'Destino', 'DataEnvio', 'PrevisaoOriginal', 'PrevisaoRetorno', 'RetornoReal', 'Documento', 'Custo'],
   eventos: ['Title', 'OcorrenciaId', 'Equipamento', 'Data', 'Responsavel', 'Realizado'],
   mecanicos: []
@@ -189,6 +190,9 @@ function criar(deps) {
       const eq = txt(b.equipamento), local = txt(b.local), motivo = txt(b.motivo, 250);
       if (!eq || !local || !motivo) throw erro(400, 'Informe equipamento, local e motivo.');
       const quando = partesSP(b.paradaEm);
+      const etapaIni = ETAPAS_INICIAIS.indexOf(String(b.situacao || '')) !== -1 ? String(b.situacao) : 'Diagnóstico';
+      if (etapaIni === 'Aguardando peça' && !txt(b.peca)) throw erro(400, 'Informe a peça que está sendo aguardada.');
+      if (etapaIni === 'Serviço Téc Especializado' && (!txt(b.servico) || !txt(b.empresa))) throw erro(400, 'Informe o serviço e a empresa/técnico especializado.');
       const frota = await acharFrota(eq);
       if (!frota) throw erro(400, 'Equipamento "' + eq + '" não encontrado na Frota.');
       const abertas = (await itensDe('ocorrencias'));
@@ -204,29 +208,63 @@ function criar(deps) {
       await patchFrota(frota.id, { LocalAtual: local, StatusAtual: 'EM MANUTENÇÃO', ResponsavelTecnico: quem(b), ObservacaoManutencao: motivo, TipoManutencao: '' });
       if (!jaEstava || localAntes !== local) {
         await registrarMovimentacao({ Equipamento: eq, ItemVinculado: ff.ItemVinculado || '', LocalOrigem: localAntes || '—', LocalDestino: local, Status: 'EM MANUTENÇÃO',
-          Data: quando.d + 'T12:00:00', Usuario: sessao.nome || '', Observacao: 'Entrada na manutenção — lançada no tablet', ResponsavelTecnico: quem(b), TipoManutencao: '' });
+          Data: quando.d + 'T12:00:00', Usuario: sessao.nome || '', Observacao: 'Entrada na manutenção — lançada no tablet', ResponsavelTecnico: quem(b) });
       }
       const horim = num(b.horimetro);
-      await criarItem('ocorrencias', { Title: eq, DataEntrada: quando.d, Etapa: 'Diagnóstico', Motivo: motivo, Tipo: '', Responsavel: quem(b), PrevisaoRetorno: null, Situacao: 'Aberta',
+      const criada = await criarItem('ocorrencias', { Title: eq, DataEntrada: quando.d, Etapa: etapaIni, Motivo: motivo, Responsavel: quem(b), PrevisaoRetorno: ymd(b.previsao) || null, Situacao: 'Aberta',
         Observacao: txt(b.observacao), Prioridade: 'Normal', HoraEntrada: quando.h, DataParada: quando.d, HoraParada: quando.h, HorimetroEntrada: horim });
+      if (etapaIni === 'Aguardando peça' || etapaIni === 'Serviço Téc Especializado') {
+        const nova = criada && criada.id ? criada : null;
+        if (nova && etapaIni === 'Aguardando peça') {
+          await criarItem('pecas', { Title: txt(b.peca, 250), OcorrenciaId: String(nova.id), Equipamento: eq, Situacao: 'Aguardando', TipoPeca: 'Compra', Destino: '',
+            PrevisaoOriginal: ymd(b.previsao) || null, PrevisaoRetorno: ymd(b.previsao) || null, Custo: 0 });
+        } else if (nova) {
+          await criarItem('pecas', { Title: txt(b.servico, 250), OcorrenciaId: String(nova.id), Equipamento: eq, Situacao: 'Em reparo externo', TipoPeca: 'Conserto/reparo', Destino: txt(b.empresa, 250),
+            DataEnvio: quando.d, PrevisaoOriginal: ymd(b.previsao) || null, PrevisaoRetorno: ymd(b.previsao) || null, Custo: 0 });
+        }
+      }
       res.json({ ok: true });
     }));
 
     // ---- paradas em aberto ----
     app.get('/api/manutencao/abertas', auth(async function (req, res) {
-      const [itens, frotas] = await Promise.all([itensDe('ocorrencias'), lerTudo('/sites/' + SITE_ID + '/lists/' + LISTA_FROTA_ID + '/items?$expand=fields&$top=999')]);
+      const [itens, frotas, pecas] = await Promise.all([itensDe('ocorrencias'), lerTudo('/sites/' + SITE_ID + '/lists/' + LISTA_FROTA_ID + '/items?$expand=fields&$top=999'), itensDe('pecas').catch(function () { return []; })]);
       const desc = {};
       frotas.forEach(function (i) { const f = i.fields || {}; desc[String(f.Title || '').trim().toUpperCase()] = f.Descricao || ''; });
-      const abertas = [];
+      const pendPorOc = {};
+      for (const p of pecas) {
+        const f = await ler('pecas', p);
+        if (String(f.Situacao || '') === 'Recebida') continue;
+        const k = String(f.OcorrenciaId || '');
+        if (!pendPorOc[k]) pendPorOc[k] = f.Title || '';
+      }
+      const abertas = [], concluidas = [], abertasEq = {};
       for (const it of itens) {
         const f = await ler('ocorrencias', it);
-        if (String(f.Situacao || 'Aberta') === 'Concluída') continue;
         const eq = String(f.Title || '').trim();
+        if (String(f.Situacao || 'Aberta') === 'Concluída') { concluidas.push({ id: it.id, eq: eq, f: f }); continue; }
+        abertasEq[eq.toUpperCase()] = true;
         abertas.push({ id: it.id, equipamento: eq, descricao: desc[eq.toUpperCase()] || '', motivo: f.Motivo || '', mecanico: f.Responsavel || '',
-          etapa: f.Etapa || 'Diagnóstico', paradaEm: paraIso(ymd(f.DataParada) || ymd(f.DataEntrada), f.HoraParada || f.HoraEntrada) });
+          etapa: f.Etapa || 'Diagnóstico', peca: pendPorOc[String(it.id)] || '', previsao: ymd(f.PrevisaoRetorno), paradaEm: paraIso(ymd(f.DataParada) || ymd(f.DataEntrada), f.HoraParada || f.HoraEntrada) });
       }
       abertas.sort(function (a, b) { return String(a.paradaEm).localeCompare(String(b.paradaEm)); });
-      res.json({ abertas: abertas });
+      // Disponíveis: liberados que continuam na manutenção (última ficha do equipamento, sem envio ao contrato)
+      const ultima = {};
+      concluidas.forEach(function (c) {
+        const k = c.eq.toUpperCase(), quando = ymd(c.f.DataSaida) + 'T' + String(c.f.HoraSaida || '00:00').slice(0, 5);
+        if (!ultima[k] || quando > ultima[k].quando) ultima[k] = { c: c, quando: quando };
+      });
+      const disponiveis = [];
+      Object.keys(ultima).forEach(function (k) {
+        const c = ultima[k].c;
+        if (abertasEq[k]) return;
+        if (String(c.f.DestinoLiberacao || '') !== 'Disponível na manutenção' || ymd(c.f.DataEnvioContrato)) return;
+        const obs = String(c.f.Observacao || '');
+        const comPend = /\[PENDÊNCIA\]/.test(obs);
+        disponiveis.push({ id: c.id, equipamento: c.eq, descricao: desc[k] || '', liberadoEm: paraIso(ymd(c.f.DataSaida), c.f.HoraSaida), comPendencia: comPend });
+      });
+      disponiveis.sort(function (a, b) { return String(b.liberadoEm).localeCompare(String(a.liberadoEm)); });
+      res.json({ abertas: abertas, disponiveis: disponiveis });
     }));
 
     // ---- atualizar situação (etapa) ----
@@ -295,7 +333,7 @@ function criar(deps) {
         await patchFrota(frota.id, { StatusAtual: 'DISPONÍVEL', TipoManutencao: '', ResponsavelTecnico: '', ObservacaoManutencao: '', PrevisaoReparo: null });
         await registrarMovimentacao({ Equipamento: eq, ItemVinculado: ff.ItemVinculado || '', LocalOrigem: local || '—', LocalDestino: local || '—', Status: 'DISPONÍVEL',
           Data: lib.d + 'T12:00:00', Usuario: sessao.nome || '', Observacao: 'Manutenção concluída — lançada no tablet · disponível na manutenção' + (comPend ? ' · liberado COM pendência: ' + txt(b.pendencia) : ' · liberado sem pendência'),
-          TipoManutencao: oc.f.Tipo || '', ResponsavelTecnico: oc.f.Responsavel || '' });
+          ResponsavelTecnico: oc.f.Responsavel || '' });
       }
       await atualizarItem('ocorrencias', oc.id, { Situacao: 'Concluída', DataSaida: lib.d, HoraSaida: lib.h, HorimetroSaida: horimS, DestinoLiberacao: 'Disponível na manutenção', ContratoDestino: '',
         Observacao: [oc.f.Observacao || '', 'Conclusão: ' + txt(b.servico), comPend ? '[PENDÊNCIA] ' + txt(b.pendencia).replace(/\n+/g, ' ') : ''].filter(Boolean).join('\n') });
